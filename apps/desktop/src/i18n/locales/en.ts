@@ -1148,6 +1148,7 @@ export default {
     editConnection: "Edit Connection",
     revealDatabaseFile: "Reveal in File Manager",
     selectVisibleDatabases: "Select Visible Databases",
+    configureVisibleObjects: "Visible Object Filter",
     userAdmin: "Users & Privileges",
     openUserAdmin: "Open Users & Privileges",
     duplicateConnection: "Duplicate Connection",

@@ -584,8 +584,17 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
 }
 
 pub async fn list_schemas_core(state: &AppState, connection_id: &str, database: &str) -> Result<Vec<String>, String> {
+    list_schemas_core_with_visible_filter(state, connection_id, database, false).await
+}
+
+pub async fn list_schemas_core_with_visible_filter(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    apply_visible_filter: bool,
+) -> Result<Vec<String>, String> {
     retry_metadata_connection(state, connection_id, Some(database), || {
-        list_schemas_once(state, connection_id, database)
+        list_schemas_once(state, connection_id, database, apply_visible_filter)
     })
     .await
 }
@@ -614,13 +623,19 @@ async fn list_schema_infos_once(
         }
     }
 
-    let schemas = list_schemas_once(state, connection_id, database).await?;
+    let schemas = list_schemas_once(state, connection_id, database, false).await?;
     Ok(schemas.into_iter().map(|name| db::SchemaInfo { name, comment: None }).collect())
 }
 
-async fn list_schemas_once(state: &AppState, connection_id: &str, database: &str) -> Result<Vec<String>, String> {
+async fn list_schemas_once(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    apply_visible_filter: bool,
+) -> Result<Vec<String>, String> {
     let pool_key = state.get_or_create_pool(connection_id, Some(database)).await?;
     let db_config = connection_config(state, connection_id).await;
+    let visible_schema_filter = visible_schema_filter(db_config.as_ref(), database, apply_visible_filter);
 
     {
         let connections = state.connections.read().await;
@@ -640,13 +655,28 @@ async fn list_schemas_once(state: &AppState, connection_id: &str, database: &str
             let fallback_config = db_config.clone();
             drop(connections);
             let mut client = client.lock().await;
-            match client.list_schemas::<Vec<String>>(database, agent_metadata_timeout(db_config.as_ref())).await {
-                Ok(schemas) if !schemas.is_empty() => return Ok(schemas),
+            match client
+                .list_schemas_filtered::<Vec<String>>(
+                    database,
+                    visible_schema_filter.as_deref(),
+                    agent_metadata_timeout(db_config.as_ref()),
+                )
+                .await
+            {
+                Ok(schemas) if !schemas.is_empty() => {
+                    return Ok(filter_visible_schema_names(schemas, visible_schema_filter.as_deref()))
+                }
                 Ok(schemas) => {
                     if let Some(config) = fallback_config.as_ref() {
                         match native_postgres_metadata_pool(state, connection_id, database, config).await {
-                            Ok(Some(pool)) => return db::postgres::list_schemas(&pool).await,
-                            Ok(None) => return Ok(schemas),
+                            Ok(Some(pool)) => {
+                                return db::postgres::list_schemas(&pool).await.map(|schemas| {
+                                    filter_visible_schema_names(schemas, visible_schema_filter.as_deref())
+                                })
+                            }
+                            Ok(None) => {
+                                return Ok(filter_visible_schema_names(schemas, visible_schema_filter.as_deref()))
+                            }
                             Err(error) => {
                                 log::warn!(
                                     "[schema][agent:list_schemas:fallback-failed] connection_id={} database={} error={}",
@@ -657,16 +687,21 @@ async fn list_schemas_once(state: &AppState, connection_id: &str, database: &str
                             }
                         }
                     }
-                    return Ok(schemas);
+                    return Ok(filter_visible_schema_names(schemas, visible_schema_filter.as_deref()));
                 }
                 Err(agent_error) => {
                     if let Some(config) = fallback_config.as_ref() {
                         if let Some(pool) =
                             native_postgres_metadata_pool(state, connection_id, database, config).await?
                         {
-                            return db::postgres::list_schemas(&pool).await.map_err(|fallback_error| {
-                                format!("{agent_error}\n\nNative PostgreSQL metadata fallback failed: {fallback_error}")
-                            });
+                            return db::postgres::list_schemas(&pool)
+                                .await
+                                .map(|schemas| filter_visible_schema_names(schemas, visible_schema_filter.as_deref()))
+                                .map_err(|fallback_error| {
+                                    format!(
+                                        "{agent_error}\n\nNative PostgreSQL metadata fallback failed: {fallback_error}"
+                                    )
+                                });
                         }
                     }
                     return Err(agent_error);
@@ -679,15 +714,37 @@ async fn list_schemas_once(state: &AppState, connection_id: &str, database: &str
     let pool = connections.get(&pool_key).ok_or("Pool not found")?;
 
     match pool {
-        PoolKind::Postgres(p) => db::postgres::list_schemas(p).await,
+        PoolKind::Postgres(p) => db::postgres::list_schemas(p)
+            .await
+            .map(|schemas| filter_visible_schema_names(schemas, visible_schema_filter.as_deref())),
         #[cfg(feature = "duckdb-bundled")]
         PoolKind::DuckDb(con) => {
             let duckdb_attached_names = duckdb_attached_database_names(state, connection_id).await;
             let con = con.lock().map_err(|e| e.to_string())?;
             duckdb_list_schemas_with_attached(&con, database, &duckdb_attached_names)
+                .map(|schemas| filter_visible_schema_names(schemas, visible_schema_filter.as_deref()))
         }
         _ => Ok(vec![]),
     }
+}
+
+fn visible_schema_filter(
+    config: Option<&ConnectionConfig>,
+    database: &str,
+    apply_visible_filter: bool,
+) -> Option<Vec<String>> {
+    if !apply_visible_filter {
+        return None;
+    }
+    config?.visible_schemas.as_ref()?.get(database).cloned()
+}
+
+fn filter_visible_schema_names(schemas: Vec<String>, visible: Option<&[String]>) -> Vec<String> {
+    let Some(visible) = visible else {
+        return schemas;
+    };
+    let visible: std::collections::HashSet<&str> = visible.iter().map(String::as_str).collect();
+    schemas.into_iter().filter(|schema| visible.contains(schema.as_str())).collect()
 }
 
 pub async fn list_tables_core(
@@ -1177,9 +1234,10 @@ mod tests {
     use super::db;
     use super::{
         clickhouse_metadata_database, deduplicate_column_infos, filter_mysql_system_databases_for_config,
-        filter_table_infos, is_agent_postgres_metadata_fallback_config, is_retryable_metadata_error,
-        mysql_table_metadata_catalog, normalize_information_schema_table_type, oracle_table_comment_from_query_result,
-        oracle_table_comment_sql, presto_like_information_schema_tables_sql, presto_like_tables_from_query_result,
+        filter_table_infos, filter_visible_schema_names, is_agent_postgres_metadata_fallback_config,
+        is_retryable_metadata_error, mysql_table_metadata_catalog, normalize_information_schema_table_type,
+        oracle_table_comment_from_query_result, oracle_table_comment_sql, presto_like_information_schema_tables_sql,
+        presto_like_tables_from_query_result, visible_schema_filter,
     };
     #[cfg(feature = "duckdb-bundled")]
     use super::{
@@ -1187,6 +1245,7 @@ mod tests {
         duckdb_query_tables_in_database,
     };
     use crate::models::connection::{ConnectionConfig, DatabaseType};
+    use std::collections::HashMap;
 
     fn test_column(name: &str, comment: Option<&str>, is_primary_key: bool) -> super::db::ColumnInfo {
         super::db::ColumnInfo {
@@ -1263,6 +1322,28 @@ mod tests {
         assert!(is_retryable_metadata_error("connection reset by peer"));
         assert!(!is_retryable_metadata_error("Unknown column 'email' in 'field list'"));
         assert!(!is_retryable_metadata_error("Access denied for user"));
+    }
+
+    #[test]
+    fn visible_schema_filter_only_applies_when_requested() {
+        let mut config = test_connection_config(DatabaseType::Oracle);
+        config.visible_schemas =
+            Some(HashMap::from([("ORCLPDB1".to_string(), vec!["APP".to_string(), "REPORTING".to_string()])]));
+
+        assert_eq!(visible_schema_filter(Some(&config), "ORCLPDB1", false), None);
+        assert_eq!(
+            visible_schema_filter(Some(&config), "ORCLPDB1", true),
+            Some(vec!["APP".to_string(), "REPORTING".to_string()])
+        );
+        assert_eq!(visible_schema_filter(Some(&config), "OTHER", true), None);
+    }
+
+    #[test]
+    fn filter_visible_schema_names_preserves_database_order() {
+        let schemas = vec!["APP".to_string(), "SYS".to_string(), "REPORTING".to_string()];
+        let visible = vec!["REPORTING".to_string(), "APP".to_string()];
+
+        assert_eq!(filter_visible_schema_names(schemas, Some(&visible)), vec!["APP", "REPORTING"]);
     }
 
     fn test_table_info(name: &str) -> super::db::TableInfo {

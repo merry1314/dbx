@@ -1193,7 +1193,7 @@ export const useConnectionStore = defineStore("connection", () => {
             return;
           }
         }
-        const schemas = await withMetadataLoadTimeout(connectionId, api.listSchemas(connectionId, effectiveDb), "schemas");
+        const schemas = await withMetadataLoadTimeout(connectionId, api.listSchemas(connectionId, effectiveDb, true), "schemas");
         const visibleSchemas = filterSchemaNamesForConnection(schemas, config, effectiveDb || "");
         const schemaNodes: TreeNode[] = sortSidebarNames(visibleSchemas).map((s) => ({
           id: `${connectionId}:${s}:${s}`,

@@ -265,6 +265,24 @@ func TestListDatabasesSQLUsesUserDictionaryInsteadOfObjectDictionary(t *testing.
 	}
 }
 
+func TestListDatabasesSQLCanApplyVisibleSchemaFilter(t *testing.T) {
+	sqlText, args := oracleListDatabasesSQLWithVisibleSchemas([]string{"APP", "REPORTING"})
+	upperSQL := strings.ToUpper(sqlText)
+
+	if !strings.Contains(upperSQL, "ALL_USERS") {
+		t.Fatalf("schema listing should query ALL_USERS, got: %s", sqlText)
+	}
+	if !strings.Contains(upperSQL, "USERNAME IN (:1,:2)") {
+		t.Fatalf("schema listing should apply visible schema filter, got: %s", sqlText)
+	}
+	if len(args) != 2 || args[0] != "APP" || args[1] != "REPORTING" {
+		t.Fatalf("visible schema args were not preserved: %#v", args)
+	}
+	if strings.Contains(upperSQL, "ALL_TABLES") || strings.Contains(upperSQL, "ALL_VIEWS") {
+		t.Fatalf("schema listing should not scan object dictionaries, got: %s", sqlText)
+	}
+}
+
 func TestListTablesSQLUsesSplitDictionaryQuery(t *testing.T) {
 	sqlText := strings.ToUpper(oracleListTablesSQL)
 

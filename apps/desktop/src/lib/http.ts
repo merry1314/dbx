@@ -478,8 +478,8 @@ export async function deleteSchemaCachePrefix(prefix: string): Promise<void> {
   return del(`/api/schema/cache-prefix?${qs({ prefix })}`);
 }
 
-export async function listSchemas(connectionId: string, database: string): Promise<string[]> {
-  return get(`/api/schema/schemas?${qs({ connection_id: connectionId, database })}`);
+export async function listSchemas(connectionId: string, database: string, applyVisibleFilter = false): Promise<string[]> {
+  return get(`/api/schema/schemas?${qs({ connection_id: connectionId, database, apply_visible_filter: applyVisibleFilter || undefined })}`);
 }
 
 export async function listSchemaInfos(connectionId: string, database: string): Promise<SchemaInfo[]> {

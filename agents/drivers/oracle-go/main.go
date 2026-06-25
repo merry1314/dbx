@@ -323,7 +323,7 @@ func (s *server) dispatch(method string, params map[string]json.RawMessage) (any
 		result, err := s.listDatabases()
 		return result, false, err
 	case "list_schemas":
-		result, err := s.listSchemas()
+		result, err := s.listSchemas(stringSliceParam(params, "visible_schemas"))
 		return result, false, err
 	case "list_tables":
 		schema := stringParam(params, "schema")
@@ -570,8 +570,11 @@ func (s *server) currentSchemaDatabase() ([]databaseInfo, error) {
 	return []databaseInfo{{Name: schema}}, nil
 }
 
-func (s *server) listSchemas() ([]string, error) {
-	databases, err := s.listDatabases()
+func (s *server) listSchemas(visibleSchemas []string) ([]string, error) {
+	if visibleSchemas != nil && len(visibleSchemas) == 0 {
+		return []string{}, nil
+	}
+	databases, err := s.listDatabasesFiltered(visibleSchemas)
 	if err != nil {
 		return nil, err
 	}
@@ -580,6 +583,55 @@ func (s *server) listSchemas() ([]string, error) {
 		result = append(result, database.Name)
 	}
 	return emptyIfNil(result), nil
+}
+
+func (s *server) listDatabasesFiltered(visibleSchemas []string) ([]databaseInfo, error) {
+	if visibleSchemas == nil {
+		return s.listDatabases()
+	}
+	sqlText, args := oracleListDatabasesSQLWithVisibleSchemas(visibleSchemas)
+	rows, err := s.queryRows(sqlText, args)
+	if err != nil {
+		if isOraclePGALimitError(err) {
+			return s.currentSchemaDatabase()
+		}
+		return nil, err
+	}
+	defer rows.Close()
+	var result []databaseInfo
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		result = append(result, databaseInfo{Name: name})
+	}
+	if err := rows.Err(); err != nil {
+		if isOraclePGALimitError(err) {
+			return s.currentSchemaDatabase()
+		}
+		return nil, err
+	}
+	return emptyIfNil(result), nil
+}
+
+func oracleListDatabasesSQLWithVisibleSchemas(visibleSchemas []string) (string, []any) {
+	if len(visibleSchemas) == 0 {
+		return oracleListDatabasesSQL, nil
+	}
+	placeholders := make([]string, 0, len(visibleSchemas))
+	args := make([]any, 0, len(visibleSchemas))
+	for i, schema := range visibleSchemas {
+		placeholders = append(placeholders, fmt.Sprintf(":%d", i+1))
+		args = append(args, schema)
+	}
+	sqlText := strings.Replace(
+		oracleListDatabasesSQL,
+		"\nORDER BY CASE",
+		"\n  AND username IN ("+strings.Join(placeholders, ",")+")\nORDER BY CASE",
+		1,
+	)
+	return sqlText, args
 }
 
 func (s *server) currentSchema() (string, error) {
@@ -1349,6 +1401,17 @@ func stringParam(params map[string]json.RawMessage, key string) string {
 	}
 	var value string
 	_ = json.Unmarshal(params[key], &value)
+	return value
+}
+
+func stringSliceParam(params map[string]json.RawMessage, key string) []string {
+	if params == nil || len(params[key]) == 0 {
+		return nil
+	}
+	var value []string
+	if err := json.Unmarshal(params[key], &value); err != nil {
+		return nil
+	}
 	return value
 }
 

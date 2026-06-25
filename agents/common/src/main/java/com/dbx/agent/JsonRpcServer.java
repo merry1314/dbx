@@ -105,7 +105,7 @@ public final class JsonRpcServer {
         }
         if (AgentProtocol.METHOD_LIST_SCHEMAS.equals(method)) {
             switchCatalog(params);
-            return agent.listSchemas();
+            return agent.listSchemas(stringListOrNull(params, "visible_schemas"));
         }
         if (AgentProtocol.METHOD_LIST_TABLES.equals(method)) {
             switchCatalog(params);
@@ -287,6 +287,15 @@ public final class JsonRpcServer {
             return null;
         }
         return element.getAsString();
+    }
+
+    private List<String> stringListOrNull(JsonObject object, String key) {
+        JsonElement element = object.get(key);
+        if (element == null || element instanceof JsonNull) {
+            return null;
+        }
+        Type listType = new TypeToken<List<String>>() {}.getType();
+        return gson.fromJson(element, listType);
     }
 
     private static Integer intOrNull(JsonObject object, String key) {

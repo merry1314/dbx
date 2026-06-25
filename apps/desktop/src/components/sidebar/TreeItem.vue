@@ -3561,12 +3561,11 @@ function treeItemMenuItems(): ContextMenuItem[] {
     });
     if (canConfigureVisibleDatabases.value) {
       items.push({
-        label: t("contextMenu.selectVisibleDatabases"),
+        label: t("contextMenu.configureVisibleObjects"),
         action: openVisibleDatabasesDialog,
         icon: ListFilter,
       });
-    }
-    if (canConfigureVisibleSchemas.value) {
+    } else if (canConfigureVisibleSchemas.value) {
       items.push({
         label: t("visibleSchemas.title"),
         action: openVisibleSchemasDialog,

@@ -1147,6 +1147,7 @@ export default {
     editConnection: "编辑连接",
     revealDatabaseFile: "在文件管理器中显示",
     selectVisibleDatabases: "选择显示数据库",
+    configureVisibleObjects: "可见对象过滤器",
     duplicateConnection: "复制连接",
     userAdmin: "用户与权限",
     openUserAdmin: "打开用户与权限",
