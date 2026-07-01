@@ -94,7 +94,8 @@ let cachedSystemFonts: string[] | null = null;
 let pendingSystemFonts: Promise<string[]> | null = null;
 
 const props = defineProps<{
-  open: boolean;
+  open?: boolean;
+  variant?: "dialog" | "page";
   initialTab?: string;
   initialSection?: string;
   appVersion?: string;
@@ -103,6 +104,23 @@ const props = defineProps<{
 const emit = defineEmits<{
   "update:open": [value: boolean];
 }>();
+
+const isSettingsPage = computed(() => props.variant === "page");
+const settingsVisible = computed(() => isSettingsPage.value || props.open === true);
+const settingsRootComponent = computed(() => (isSettingsPage.value ? "div" : Dialog));
+const settingsRootProps = computed(() => (isSettingsPage.value ? {} : { open: props.open === true }));
+const settingsRootClass = computed(() => (isSettingsPage.value ? "h-full min-h-0 overflow-hidden bg-background" : ""));
+const settingsContentComponent = computed(() => (isSettingsPage.value ? "div" : DialogContent));
+const settingsContentClass = computed(() => (isSettingsPage.value ? "flex h-full min-h-0 flex-col gap-4 overflow-hidden bg-background p-4" : "h-[min(660px,calc(100dvh-80px))] !max-w-[min(920px,calc(100vw-32px))] grid-rows-[auto_minmax(0,1fr)] gap-3 p-4 sm:!max-w-[min(920px,calc(100vw-48px))]"));
+const settingsTitleComponent = computed(() => (isSettingsPage.value ? "h2" : DialogTitle));
+
+function onSettingsRootOpenChange(value: boolean) {
+  if (!isSettingsPage.value) emit("update:open", value);
+}
+
+function closeSettings() {
+  emit("update:open", false);
+}
 
 interface TableColumnTemplateOverrideRow {
   id: string;
@@ -459,7 +477,7 @@ async function loadSystemFontOptions() {
 
 // Sync from store when dialog opens
 watch(
-  () => props.open,
+  () => settingsVisible.value,
   (open) => {
     if (open) {
       editFontFamily.value = settingsStore.editorSettings.fontFamily;
@@ -641,7 +659,7 @@ async function applySettings() {
 
 async function applySettingsAndClose() {
   await persistSettings();
-  emit("update:open", false);
+  closeSettings();
 }
 
 function resetDefaultsForTab(tab: SettingsCategory) {
@@ -1345,7 +1363,7 @@ async function scrollToInitialSettingsSection() {
 }
 
 watch(
-  () => props.open,
+  () => settingsVisible.value,
   async (open) => {
     if (open) {
       activeSettingsTab.value = props.initialTab || "editor";
@@ -1374,7 +1392,16 @@ watch(
 watch(
   () => props.initialSection,
   () => {
-    if (props.open) void scrollToInitialSettingsSection();
+    if (settingsVisible.value) void scrollToInitialSettingsSection();
+  },
+);
+
+watch(
+  () => props.initialTab,
+  (tab) => {
+    if (!settingsVisible.value || !tab) return;
+    activeSettingsTab.value = tab;
+    void scrollToInitialSettingsSection();
   },
 );
 
@@ -1848,14 +1875,19 @@ watch(
 
 let previewInitialized = false;
 
+function cleanupPreviewEditor() {
+  if (!previewView.value) return;
+  previewView.value.destroy();
+  previewView.value = null;
+  previewInitialized = false;
+  fontThemeComp = null;
+  themeComp = null;
+  editorViewModule = null;
+}
+
 watch(activeSettingsTab, (tab) => {
   if (tab !== "editor" && previewView.value) {
-    previewView.value.destroy();
-    previewView.value = null;
-    previewInitialized = false;
-    fontThemeComp = null;
-    themeComp = null;
-    editorViewModule = null;
+    cleanupPreviewEditor();
   }
 });
 
@@ -1882,28 +1914,23 @@ watch(previewRef, async (el) => {
 });
 
 watch(
-  () => props.open,
+  () => settingsVisible.value,
   (open) => {
-    if (!open && previewView.value) {
-      previewView.value.destroy();
-      previewView.value = null;
-      previewInitialized = false;
-      fontThemeComp = null;
-      themeComp = null;
-      editorViewModule = null;
-    }
+    if (!open) cleanupPreviewEditor();
   },
 );
+
+onUnmounted(cleanupPreviewEditor);
 </script>
 
 <template>
-  <Dialog :open="open" @update:open="(v: boolean) => emit('update:open', v)">
-    <DialogContent class="h-[min(660px,calc(100dvh-80px))] !max-w-[min(920px,calc(100vw-32px))] grid-rows-[auto_minmax(0,1fr)] gap-3 p-4 sm:!max-w-[min(920px,calc(100vw-48px))]">
+  <component :is="settingsRootComponent" v-bind="settingsRootProps" :class="settingsRootClass" @update:open="onSettingsRootOpenChange">
+    <component :is="settingsContentComponent" :class="settingsContentClass">
       <DialogHeader>
-        <DialogTitle class="flex items-center gap-2">
+        <component :is="settingsTitleComponent" class="flex items-center gap-2 text-base leading-none font-medium cn-font-heading">
           <Settings class="h-4 w-4" />
           {{ t("settings.title") }}
-        </DialogTitle>
+        </component>
       </DialogHeader>
 
       <div class="flex min-h-0 flex-1 flex-col gap-3 overflow-hidden sm:flex-row">
@@ -3519,7 +3546,7 @@ watch(
               {{ t("settings.resetDefaults") }}
             </Button>
             <div class="flex-1" />
-            <Button variant="outline" @click="emit('update:open', false)">
+            <Button variant="outline" @click="closeSettings">
               {{ t("common.close") }}
             </Button>
             <Button :disabled="!hasChanges() || hasApplyBlocker" @click="applySettings">
@@ -3556,12 +3583,12 @@ watch(
                 </Button>
               </span>
             </div>
-            <Button variant="outline" @click="emit('update:open', false)">{{ t("common.close") }}</Button>
+            <Button variant="outline" @click="closeSettings">{{ t("common.close") }}</Button>
             <Button :disabled="!aiHasChanges() || !!aiCodexValidationError" @click="aiApplySettings">{{ t("settings.apply") }}</Button>
           </DialogFooter>
 
           <DialogFooter v-else-if="activeSettingsTab === 'sync'" class="mx-0 mb-0 flex-row flex-wrap items-center justify-end gap-2 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 sm:flex-row sm:gap-2 [&>button]:w-auto [&>button]:shrink-0">
-            <Button variant="outline" @click="emit('update:open', false)">
+            <Button variant="outline" @click="closeSettings">
               {{ t("common.close") }}
             </Button>
             <p v-if="webdavMessage" class="text-xs self-center truncate max-w-[280px]" :class="webdavError ? 'text-destructive' : 'text-green-500'">
@@ -3585,7 +3612,7 @@ watch(
           </DialogFooter>
 
           <DialogFooter v-else-if="activeSettingsTab === 'mcp' && !isWeb" class="mx-0 mb-0 flex-row flex-wrap items-center justify-end gap-2 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 sm:flex-row sm:gap-2 [&>button]:w-auto [&>button]:shrink-0">
-            <Button variant="outline" @click="emit('update:open', false)">
+            <Button variant="outline" @click="closeSettings">
               {{ t("common.close") }}
             </Button>
             <div class="flex-1" />
@@ -3601,7 +3628,7 @@ watch(
           </DialogFooter>
 
           <DialogFooter v-else-if="activeSettingsTab === 'security' && isWeb" class="mx-0 mb-0 flex-row flex-wrap items-center justify-end gap-2 rounded-none border-t border-border/60 bg-transparent px-0 pb-0 pt-3 sm:flex-row sm:gap-2 [&>button]:w-auto [&>button]:shrink-0">
-            <Button variant="outline" @click="emit('update:open', false)">
+            <Button variant="outline" @click="closeSettings">
               {{ t("common.close") }}
             </Button>
             <Button :disabled="changingPassword || !oldPassword || !newPassword || !confirmNewPassword" @click="changePassword">
@@ -3614,7 +3641,7 @@ watch(
               {{ t("settings.resetAllDefaults") }}
             </Button>
             <div class="flex-1" />
-            <Button variant="outline" @click="emit('update:open', false)">
+            <Button variant="outline" @click="closeSettings">
               {{ t("common.close") }}
             </Button>
             <Button :disabled="!hasChanges() || hasApplyBlocker" @click="applySettings">
@@ -3626,7 +3653,7 @@ watch(
           </DialogFooter>
         </div>
       </div>
-    </DialogContent>
+    </component>
 
     <!-- Theme Customizer Dialog -->
     <ThemeCustomizerDialog v-model:open="showThemeCustomizer" :themes="editCustomThemes" :active-theme-id="editActiveCustomThemeId" @save="handleThemeSave" />
@@ -3666,5 +3693,5 @@ watch(
         </DialogFooter>
       </DialogContent>
     </Dialog>
-  </Dialog>
+  </component>
 </template>
